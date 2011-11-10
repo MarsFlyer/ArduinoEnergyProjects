@@ -190,6 +190,7 @@ static void rfwrite(){
     TEST_PRINT(" diff:");
     TEST_PRINT(millis() - timeStart);
     rf12_sleep(-1); //wake up RF module
+    rf12_recvDone();
     while (!rf12_canSend()) {
       if ((millis() - timeStart) > 4000) {
         TEST_PRINTLN("RF failed.");
@@ -198,7 +199,9 @@ static void rfwrite(){
       }
     }
     rf12_recvDone();
-    rf12_sendStart(rf12_hdr, &rftx, sizeof rftx); //, RADIO_SYNC_MODE);
+    //rf12_hdr
+    rf12_sendStart(0, &rftx, sizeof rftx); //, RADIO_SYNC_MODE);
+    rf12_sendWait(0);  //Power-down mode during wait: 0 = NORMAL, 1 = IDLE, 2 = STANDBY, 3 = PWR_DOWN. Values 2 and 3 can cause the millisecond time to lose a few interrupts. Value 3 can only be used if the ATmega fuses have been set for fast startup, i.e. 258 CK - the default Arduino fuse settings are not suitable for full power down.
     rf12_sleep(0); //put RF module to sleep
     TEST_PRINTLN("RF sent.");
 }
