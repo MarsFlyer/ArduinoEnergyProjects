@@ -175,4 +175,16 @@ int reply_recieved()
   return data_recieved;
 }
 
-
+/*
+Example results
+HTTP/1.1 200 OK
+Date: Mon, 21 Nov 2011 09:30:51 GMT
+Content-Type: text/plain; charset=utf-8
+Connection: close
+X-Pachube-Logging-Key: logging.8VwV6gqSSgvfDWxxMTcT
+X-PachubeRequestId: 9d8963627f695fd5db1d021216a3116a6d7ac4b0
+Cache-Control: max-age=0
+Content-Length: 1
+Age: 0
+Vary: Accept-Encoding
+*/
