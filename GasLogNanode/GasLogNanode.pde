@@ -1,301 +1,163 @@
-///////////////withe temperature
-/*
- * Arduino + Analog Sensors Posted to Pachube 
- *      Created on: Aug 31, 2011
- *          Author: Victor Aprea
- *   Documentation: http://wickeddevice.com
- *
- *       Source Revision: 587
- *
- * Licensed under Creative Commons Attribution-Noncommercial-Share Alike 3.0
- *
- */
+/*                          _                                                      _      
+                           | |                                                    | |     
+  ___ _ __ ___   ___  _ __ | |__   __ _ ___  ___       _ __   __ _ _ __   ___   __| | ___ 
+ / _ \ '_ ` _ \ / _ \| '_ \| '_ \ / _` / __|/ _ \     | '_ \ / _` | '_ \ / _ \ / _` |/ _ \
+|  __/ | | | | | (_) | | | | |_) | (_| \__ \  __/  _  | | | | (_| | | | | (_) | (_| |  __/
+ \___|_| |_| |_|\___/|_| |_|_.__/ \__,_|___/\___| (_) |_| |_|\__,_|_| |_|\___/ \__,_|\___|
+                                                                                          
+*/
+//--------------------------------------------------------------------------------------
+// Relay's data recieved by emontx up to pachube
+// Minimal CT and supply voltage only version
 
-#include "EtherShield.h"
+// Uses JeeLabs RF12 library http://jeelabs.org/2009/02/10/rfm12b-library-for-arduino/
+// Uses Andrew Lindsay's EtherShield library - using DHCP
 
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 
- * The following #defines govern the behavior of the sketch. You can console outputs using the Serial Monitor
- * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+// By Glyn Hudson and Trystan Lea
+// openenergymonitor.org
+// GNU GPL V3
 
-#define MY_MAC_ADDRESS {0x54,0x55,0x58,0x10,0x00,0x25}               // must be uniquely defined for all Nanodes, e.g. just change the last number
-#define USE_DHCP                                                     // comment out this line to use static network parameters
-#define PACHUBE_API_KEY "3VVQ2tTUXwV4agMe5HW3b7Ya9rWzJocSMZHa7FbFKbc" // change this to your API key
-#define HTTPFEEDPATH "/v2/feeds/19886"                               // change this to th relative URL of your feed
+// Last update: 12th of November 2011
+//--------------------------------------------------------------------------------------
+#define DEBUG
+//---------------------------------------------------------------------
+// RF12 link - JeeLabs
+//---------------------------------------------------------------------
+#include <Ports.h>
+#include <RF12.h>
 
-#define SENSOR1_ANALOG_PIN 0
-#define DELAY_BETWEEN_PACHUBE_POSTS_MS 15000L      
-#define SERIAL_BAUD_RATE 19200
+#define MYNODE 2            // node ID 30 reserved for base station
+#define freq RF12_868MHZ    // frequency
+#define group 5            // network group 
 
-#ifndef USE_DHCP // then you need to supply static network parameters, only if you are not using DHCP
-  #define MY_IP_ADDRESS {192,168,  1, 25}
-  #define MY_NET_MASK   {255,255,255,  0}
-  #define MY_GATEWAY    {192,168,  1,  1}
-  #define MY_DNS_SERVER {192,168,  1,  1}
-#endif
+// The RF12 data payload - a neat way of packaging data when sending via RF - JeeLabs
+typedef struct
+{
+  int ct1;		    // current transformer 1
+  int supplyV;              // emontx voltage
+} Payload;
+Payload emontx;              
 
-/* Datastreams:
+//---------------------------------------------------------------------
+// The PacketBuffer class is used to generate the json string that is send via ethernet - JeeLabs
+//---------------------------------------------------------------------
+class PacketBuffer : public Print {
+public:
+    PacketBuffer () : fill (0) {}
+    const char* buffer() { return buf; }
+    byte length() { return fill; }
+    void reset()
+    { 
+      memset(buf,NULL,sizeof(buf));
+      fill = 0; 
+    }
+    virtual void write(uint8_t ch)
+        { if (fill < sizeof buf) buf[fill++] = ch; }
+    byte fill;
+    char buf[150];
+    private:
+};
+PacketBuffer str;
+
+//---------------------------------------------------------------------
+// Ethernet - Andrew Lindsay
+//---------------------------------------------------------------------
+#include <EtherShield.h>
+byte mac[6] =     { 0x04,0x13,0x31,0x13,0x05,0x22};           // Unique mac address - must be unique on your local network
+
+#define PACHUBE_VHOST "api.pachube.com"
+#define PACHUBEAPIKEY "X-PachubeApiKey: 3VVQ2tTUXwV4agMe5HW3b7Ya9rWzJocSMZHa7FbFKbc" 
+#define PACHUBEAPIURL "/v2/feeds/19886.csv"
+
+byte server[4] = {173,203,98,29};
+//---------------------------------------------------------------------
+
+// Flow control varaiables
+int dataReady=0;                                                  // is set to 1 when there is data ready to be sent
+unsigned long lastRF;                                             // used to check for RF recieve failures
+int post_count;                                                   // used to count number of ethernet posts that dont recieve a reply
+    
+//---------------------------------------------------------------------
+// Setup
+//---------------------------------------------------------------------
+void setup()
+{
+  Serial.begin(9600);
+  Serial.println("Emonbase:NanodeRF ctonly");
+  Serial.print("Node: "); Serial.print(MYNODE); 
+  Serial.print(" Freq: "); Serial.print("433Mhz"); 
+  Serial.print(" Network group: "); Serial.println(group);
+  Serial.print("Posting to "); printIP(server); Serial.print(" "); Serial.println(PACHUBE_VHOST);
+
+  
+  ethernet_setup_dhcp(mac,server,80,8); // Last two: PORT and SPI PIN: 8 for Nanode, 10 for nuelectronics
+  
+  rf12_initialize(MYNODE, freq,group);
+  lastRF = millis()-40000;                                        // setting lastRF back 40s is useful as it forces the ethernet code to run straight away
+                                                                  // which means we dont have to wait to see if its working
+  pinMode(6, OUTPUT); digitalWrite(6,LOW);                       // Nanode indicator LED setup, HIGH means off! if LED lights up indicates that Etherent and RFM12 has been initialize
+}
+
+//-----------------------------------------------------------------------
+// Loop
+//-----------------------------------------------------------------------
+void loop()
+{
+digitalWrite(6,HIGH);    //turn inidicator LED off! yes off! input gets inverted by buffer
+  //---------------------------------------------------------------------
+  // On data receieved from rf12
+  //---------------------------------------------------------------------
+  if (rf12_recvDone() && rf12_crc == 0 && (rf12_hdr & RF12_HDR_CTL) == 0) 
+  {
+    digitalWrite(6,LOW);                                         // Flash LED on recieve ON
+    emontx=*(Payload*) rf12_data;                                 // Get the payload
+
+    dataReady = 1;                                                // Ok, data is ready
+    lastRF = millis();                                            // reset lastRF timer
+    digitalWrite(6,HIGH);                                          // Flash LED on recieve OFF
+  }
+  
+
+  
+  //----------------------------------------
+  // 2) Send the data
+  //----------------------------------------
+  if (ethernet_ready_dhcp() && dataReady==1)                      // If ethernet and data is ready: send data
+  {
+    /* Datastreams:
 0 = Gas, KW
 1 = Indoor Temperature, Celcius
 2 = Battery, Volts
 3 = Messages Sent, count
 4 = Pulses, count
 5 = Meter Reading, m3
+6 = kWh for the day
 */
-// change the template to be consistent with your datastreams: see http://api.pachube.com/v2/
-#define FEED_POST_MAX_LENGTH 256
-static char feedTemplate[] = "{\"version\":\"1.0.0\",\"datastreams\":[{\"id\":\"3\", \"current_value\":\"%d\"},{\"id\":\"2\",\"current_value\":\"%d.%d\"}]}";
-static char feedPost[FEED_POST_MAX_LENGTH] = {0}; // this will hold your filled out template
-uint8_t fillOutTemplateWithSensorValues(uint16_t node_id, uint16_t sensorValue1, uint16_t sensorValue2, uint16_t sensorValue3, uint16_t sensorValue4){
-  snprintf(feedPost, FEED_POST_MAX_LENGTH, feedTemplate, sensorValue1, sensorValue2); // this simply populates the current_value filed with sensorValue1
-  return (1);
-}
+    str.reset();
+    str.print("3,");
+    post_count++;
+    str.print(post_count);
 
-/////////////TEMP
-uint8_t fillOut(uint16_t sensorValue1, float sensorValue2){
-  // change this function to be consistent with your feed template, it will be passed the node id and four sensor values by the sketch
-  // if you return (1) this the sketch will post the contents of feedPost to Pachube, if you return (0) it will not post to Pachube
-  // you may use as much of the passed information as you need to fill out the template
-   uint16_t integer, mantisa;
-  integer = floor(sensorValue2);
-  mantisa = floor(1000.0f*(sensorValue2- integer));
-  snprintf(feedPost, FEED_POST_MAX_LENGTH, feedTemplate, sensorValue1, integer, mantisa); // this simply populates the current_value filed with sensorValue1
-  return (1);
-}
-/////////////TEMP
+    float battVal = (float)emontx.supplyV * 3.3 / (float)1024;
+    int integer = floor(battVal);
+    int mantissa = floor(1000.0f*(battVal- integer));
+    str.print("\r\n2,");
+    str.print(integer);
+    str.print(".");
+    str.print(mantissa);
 
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * Temperature
- * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-const float rinfinit = 93.79645;   // This you should calculate yours
-const float voltage = 5.04;        // should change it to 5040 for 5.04V
-const float B = 4100;
-const float unodivr = 93.79645;
-const float resistor = 9920;       //9920 actually, but put 10000
-int sensorPin = A0;                // select the input pin for the potentiometer
-int sensorValue = 0;               // variable to store the value coming from the sensor
-char tempBuf[32] = {0};
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * You shouldn't need to make changes below here for configuring the sketch
- * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-
-// mac and ip (if not using DHCP) have to be unique
-// in your local area network. You can not have the same numbers in
-// two devices:
-static uint8_t mymac[6] = MY_MAC_ADDRESS;
-
-// IP address of the host being queried to contact (IP of the first portion of the URL):
-static uint8_t websrvip[4] = { 0, 0, 0, 0 }; // resolved through DNS
-
-#ifndef USE_DHCP
-// use the provided static parameters
-static uint8_t myip[4]      = MY_IP_ADDRESS;
-static uint8_t mynetmask[4] = MY_NET_MASK;
-static uint8_t gwip[4]      = MY_GATEWAY;
-static uint8_t dnsip[4]     = MY_DNS_SERVER;
-#else
-// these will all be resolved through DHCP
-static uint8_t dhcpsvrip[4] = { 0,0,0,0 };    
-static uint8_t myip[4]      = { 0,0,0,0 };
-static uint8_t mynetmask[4] = { 0,0,0,0 };
-static uint8_t gwip[4]      = { 0,0,0,0 };
-static uint8_t dnsip[4]     = { 0,0,0,0 };
-#endif
-
-long lastPostTimestamp;
-boolean firstTimeFlag = true;
-// global string buffer for hostname message:
-#define FEEDHOSTNAME "api.pachube.com\r\nX-PachubeApiKey: " PACHUBE_API_KEY
-#define FEEDWEBSERVER_VHOST "api.pachube.com"
-
-static char hoststr[150] = FEEDWEBSERVER_VHOST;
-
-#define BUFFER_SIZE 550
-static uint8_t buf[BUFFER_SIZE+1];
-
-EtherShield es=EtherShield();
-
-void setup(){
-  Serial.begin(SERIAL_BAUD_RATE);
-  Serial.println("Nanode + Analog Sensors + Pachube = Awesome");
-
-  // Initialise SPI interface
-  es.ES_enc28j60SpiInit();
-
-  // initialize ENC28J60
-  es.ES_enc28j60Init(mymac, 8);
-
-#ifdef USE_DHCP
-  acquireIPAddress();
-#endif
-
-  printNetworkParameters();
-
-  //init the ethernet/ip layer:
-  es.ES_init_ip_arp_udp_tcp(mymac,myip, 80);
-
-  // init the web client:
-  es.ES_client_set_gwip(gwip);  // e.g internal IP of dsl router
-  es.ES_dnslkup_set_dnsip(dnsip); // generally same IP as router
-  
-  Serial.println("Awaiting Client Gateway");
-  while(es.ES_client_waiting_gw()){
-    int plen = es.ES_enc28j60PacketReceive(BUFFER_SIZE, buf);
-    es.ES_packetloop_icmp_tcp(buf,plen);    
-  }
-  Serial.println("Client Gateway Complete, Resolving Host");
-
-  resolveHost(hoststr, websrvip);
-  Serial.print("Resolved host: ");
-  Serial.print(hoststr);
-  Serial.print(" to IP: ");
-  printIP(websrvip);
-  Serial.println();
-  
-  es.ES_client_set_wwwip(websrvip);
-  
-  lastPostTimestamp = millis();
-}
-
-void loop(){
-  
-  
- long currentTime = millis();
-  
-  int plen = es.ES_enc28j60PacketReceive(BUFFER_SIZE, buf);
-  es.ES_packetloop_icmp_tcp(buf,plen);
-  
-  if(currentTime - lastPostTimestamp > DELAY_BETWEEN_PACHUBE_POSTS_MS || firstTimeFlag){   
-    firstTimeFlag = false;
-    ///uint16_t sensorValue1 = analogRead(SENSOR1_ANALOG_PIN);
-    ///uint16_t sensorValue2 = analogRead(SENSOR2_ANALOG_PIN);
-    ///uint16_t sensorValue3 = analogRead(SENSOR3_ANALOG_PIN);
-    ///uint16_t sensorValue4 = analogRead(SENSOR4_ANALOG_PIN);
-    float battVal = (float)300 * 3.3 / (float)1024;
-    int iMessages;
-    iMessages++;
-
-//////////////////////////////////TEMP
-    if(fillOut(iMessages, battVal)){
-   
-      es.ES_client_http_post(PSTR(HTTPFEEDPATH),PSTR(FEEDWEBSERVER_VHOST),PSTR(FEEDHOSTNAME), PSTR("PUT "), feedPost, &sensor_feed_post_callback);    
-    }
-    lastPostTimestamp = currentTime;
+    #ifdef DEBUG
+    Serial.print(str.buf);                                        // Print final json string to terminal
+    #endif
+    
+    ethernet_send_post(PSTR(PACHUBEAPIURL),PSTR(PACHUBE_VHOST),PSTR(PACHUBEAPIKEY), PSTR("PUT "),str.buf);
+    #ifdef DEBUG
+    Serial.println("sent"); 
+    #endif
+    dataReady = 0;                        // reset dataReady
   }
   
 }
-
-
-#ifdef USE_DHCP
-void acquireIPAddress(){
-  uint16_t dat_p;
-  long lastDhcpRequest = millis();
-  uint8_t dhcpState = 0;
-  Serial.println("Sending initial DHCP Discover");
-  es.ES_dhcp_start( buf, mymac, myip, mynetmask,gwip, dnsip, dhcpsvrip );
-
-  while(1) {
-    // handle ping and wait for a tcp packet
-    int plen = es.ES_enc28j60PacketReceive(BUFFER_SIZE, buf);
-
-    dat_p=es.ES_packetloop_icmp_tcp(buf,plen);
-    //    dat_p=es.ES_packetloop_icmp_tcp(buf,es.ES_enc28j60PacketReceive(BUFFER_SIZE, buf));
-    if(dat_p==0) {
-      int retstat = es.ES_check_for_dhcp_answer( buf, plen);
-      dhcpState = es.ES_dhcp_state();
-      // we are idle here
-      if( dhcpState != DHCP_STATE_OK ) {
-        if (millis() > (lastDhcpRequest + 10000L) ){
-          lastDhcpRequest = millis();
-          // send dhcp
-          Serial.println("Sending DHCP Discover");
-          es.ES_dhcp_start( buf, mymac, myip, mynetmask,gwip, dnsip, dhcpsvrip );
-        }
-      } 
-      else {
-        return;        
-      }
-    }
-  }   
-}
-#endif
-
-// hostName is an input parameter, ipAddress is an outputParame
-void resolveHost(char *hostName, uint8_t *ipAddress){
-  es.ES_dnslkup_request(buf, (uint8_t*)hostName );
-  while(1){
-    int plen = es.ES_enc28j60PacketReceive(BUFFER_SIZE, buf);
-    es.ES_packetloop_icmp_tcp(buf,plen);   
-    if(es.ES_udp_client_check_for_dns_answer(buf, plen)) {
-      uint8_t *websrvipptr = es.ES_dnslkup_getip();
-      for(int on=0; on <4; on++ ) {
-        ipAddress[on] = *websrvipptr++;
-      }     
-      return;
-    }    
-  }
-}  
-
-void sensor_feed_post_callback(uint8_t statuscode,uint16_t datapos){
-  Serial.println();
-  Serial.print("Status Code: ");
-  Serial.println(statuscode, HEX);
-  Serial.print("Datapos: ");
-  Serial.println(datapos, DEC);
-  Serial.println("PAYLOAD");
-  for(int i = 0; i < 100; i++){
-     Serial.print(byte(buf[i]));
-  }
-  
-  Serial.println();
-  Serial.println();  
-}
-
-// Output a ip address from buffer from startByte
-void printIP( uint8_t *buf ) {
-  for( int i = 0; i < 4; i++ ) {
-    Serial.print( buf[i], DEC );
-    if( i<3 )
-      Serial.print( "." );
-  }
-}
-
-void printNetworkParameters(){
-  Serial.print( "My IP: " );
-  printIP( myip );
-  Serial.println();
-
-  Serial.print( "Netmask: " );
-  printIP( mynetmask );
-  Serial.println();
-
-  Serial.print( "DNS IP: " );
-  printIP( dnsip );
-  Serial.println();
-
-  Serial.print( "GW IP: " );
-  printIP( gwip );
-  Serial.println();  
-}
-
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * Temperature
- * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-float temperatura (){
-  sensorValue = analogRead(sensorPin); //read analog 0
-  float v2 = (voltage*float(sensorValue))/1024.0f; // calculate volts in an awesome world
-  float r1a = (voltage*float(resistor))/v2;
-  float r1 =r1a - resistor;
-    //r1=10000; <---uncomment to check if the next eq is working
-  float T = B/log(r1*unodivr);
-  //Serial.print("Temperature in Celcius:");
-  T=T-273.15;
-   Serial.println(T, 4);
-   //dtostrf(T, 3, 1, tempBuf);
-   return(T);
- }
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * end of Temperature
- * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */  
 
 
 
