@@ -75,11 +75,26 @@
 #include <Ports.h>
 #include <RF12.h>
 
+#define EMONTX                 // Used by status LED
+
 #define USELEDSEG
 #ifdef USELEDSEG
   #include <NewSoftSerial.h>
   NewSoftSerial LEDSEG(4, 5);    // For 7 Segment LED display rx (not used), tx (used) 
 #endif 
+
+// For one-wire:
+#define ONEWIRE 1
+#ifdef ONEWIRE
+  #include <OneWire.h>            // Internal temperature.
+  #include <DallasTemperature.h>
+  #define pinOneWire 7  // One-wire bus
+  // Objects:
+  // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+  OneWire oneWire(pinOneWire);
+  // Pass our oneWire reference to Dallas Temperature. 
+  DallasTemperature sensors(&oneWire);
+#endif
 
 #define MYNODE 2            // node ID 30 reserved for base station
 #define freq RF12_868MHZ     // frequency
@@ -164,12 +179,17 @@ void setup()
   rf12_initialize(MYNODE, freq,group);
   lastRF = millis()-40000;                                        // setting lastRF back 40s is useful as it forces the ethernet code to run straight away
                                                                   // which means we dont have to wait to see if its working
-  pinMode(6, OUTPUT); digitalWrite(6,LOW);                       // Nanode indicator LED setup, HIGH means off! if LED lights up indicates that Etherent and RFM12 has been initialize
+  pinMode(6, OUTPUT);
+  ledStatus(true); delay(1000); ledStatus(false);                // Nanode indicator LED setup, HIGH means off! if LED lights up indicates that Etherent and RFM12 has been initialize
   
   #ifdef USELEDSEG
     LEDSEG.begin(9600);
     LEDSEG.print("z");  // Full brightness
     LEDSEG.print("gas\0");
+  #endif
+
+  #ifdef ONEWIRE
+    sensors.begin();  // Enable One Wire.
   #endif
 }
 
@@ -181,18 +201,21 @@ void loop()
   char ledBuf[5];
   char fString[10];
 
-  digitalWrite(6,HIGH);    //turn inidicator LED off! yes off! input gets inverted by buffer
+  //digitalWrite(6,HIGH);    //turn inidicator LED off! yes off! input gets inverted by buffer
+  //ledStatus(false);
   //---------------------------------------------------------------------
   // On data receieved from rf12
   //---------------------------------------------------------------------
   if (rf12_recvDone() && rf12_crc == 0 && (rf12_hdr & RF12_HDR_CTL) == 0) 
   {
-    digitalWrite(6,LOW);                                         // Flash LED on recieve ON
+    //digitalWrite(6,LOW);                                         // Flash LED on recieve ON
+    ledStatus(true);
     emontx=*(Payload*) rf12_data;                                 // Get the payload
 
     dataReady = 1;                                                // Ok, data is ready
     lastRF = millis();                                            // reset lastRF timer
-    digitalWrite(6,HIGH);                                          // Flash LED on recieve OFF
+    //digitalWrite(6,HIGH);                                          // Flash LED on recieve OFF
+    ledStatus(false);
   }
   
   ethernet_ready_dhcp();               // Keep DHCP alive
@@ -226,6 +249,20 @@ void loop()
 
     str.print("\r\n4,");
     str.print(emontx.pulse);
+
+    // Internal Temperature.
+    #ifdef ONEWIRE
+      sensors.requestTemperatures(); // Send the command to get temperatures
+      float fTemperature = -100;
+      fTemperature = sensors.getTempCByIndex(0);  // First (only) sensor.
+      if (fTemperature > -100) {
+        DEBUG_PRINT("TEMPINT=");
+        DEBUG_PRINTLN(fTemperature);
+        ftoa(fString, fTemperature, 1);
+        str.print("\r\n1,");
+        str.print(fString);
+      }
+    #endif
 
     float kW;
     unsigned long timeDiff;
@@ -282,10 +319,12 @@ void loop()
     
     if (ethernet_ready_dhcp())
     {
+      ledStatus(true);
       ethernet_send_post(PSTR(PACHUBEAPIURL),PSTR(PACHUBE_VHOST),PSTR(PACHUBEAPIKEY), PSTR("PUT "),str.buf);
       #ifdef DEBUG
       Serial.println("sent"); 
       #endif
+      ledStatus(false);
     }
     dataReady = 0;                        // reset dataReady
   }
@@ -327,7 +366,25 @@ char *ftoa(char *a, double f, int precision)
   return ret;
 }
 
-
+void ledStatus(int On)
+{
+  //On EmonTx input gets inverted by buffer
+  #ifdef EMONTX
+    if (On == false) {
+      digitalWrite(6,HIGH);
+    }
+    else {
+      digitalWrite(6,LOW);
+    }
+  #else
+    if (On == false) {
+      digitalWrite(6,LOW);
+    }
+    else {
+      digitalWrite(6,HIGH);
+    }
+  #endif
+}
 
 
 
