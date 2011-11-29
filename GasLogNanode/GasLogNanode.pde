@@ -157,8 +157,8 @@ unsigned long lastRF;                                             // used to che
 int post_count;                                                   // used to count number of ethernet posts that dont recieve a reply
 
 int pulsePrev=-1;                    // Counters
-long pulseStart=-1;
-///long pulseStart=869;
+///long pulseStart=-1;
+long pulseStart=869;
 unsigned long timePrev;
 
 //---------------------------------------------------------------------

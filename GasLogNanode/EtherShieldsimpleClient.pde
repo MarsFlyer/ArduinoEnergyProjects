@@ -27,6 +27,11 @@
 //   Licence: GPL GNU v3
 //--------------------------------------------------------
 
+#define DATESET
+#ifdef DATESET
+  #include <Time.h>          // For time sync
+#endif
+
 int data_recieved = 0;
 
 byte* mymac;
@@ -149,6 +154,8 @@ void ethernet_send_url(char * hoststr, char * urlbuf,char * urlbuf_varpart)
   es.ES_client_browse_url(urlbuf,urlbuf_varpart,hoststr,&browserresult_callback);
 }
 */
+int posLine = 0;
+
 void ethernet_send_post(char * urlbuf,char * hoststr,char * additionalheaderline,char * method,char * postval)
 {
   es.ES_client_http_post(urlbuf,hoststr,additionalheaderline,method,postval, &browserresult_callback);
@@ -159,14 +166,46 @@ void browserresult_callback(uint8_t statuscode,uint16_t datapos)
   if (datapos != 0)
   {
     uint16_t pos = datapos;
-    #ifdef DEBUG
     while (buf[pos])
     {
-      Serial.print(buf[pos]);
+      #ifdef DEBUG
+        Serial.print(buf[pos]);
+      #endif
+
+      char c = buf[pos];
+      if (c == '\r' || c == '\n')
+      {
+        if (pos > posLine +5)
+        {
+          #ifdef DATESET
+            if ((buf[posLine] == 'D') && (buf[posLine+1] == 'a') && (buf[posLine+2] == 't') && (buf[posLine+3] == 'e') && (buf[posLine+4] == ':')) { 
+              //Date: Wed, 16 Mar 2011 22:32:39 GMT\r\n
+              int hr = intPart(buf,posLine+23,posLine+25);
+              int min = intPart(buf,posLine+26,posLine+28);
+              int sec = intPart(buf,posLine+29,posLine+31);
+              int day = intPart(buf,posLine+11,posLine+13);
+              //int month = 11; 
+              int month = intMonth(buf,posLine+14,posLine+17);
+              int yr = intPart(buf,posLine+18,posLine+22);
+              setTime(hr,min,sec,day,month,yr);
+              #ifdef DEBUG
+                Serial.print(" Sync:");
+                Serial.print(datetimeString(now()));
+              #endif
+            }
+          #endif
+        }
+        posLine = pos+1;
+      }
+
       pos++;
     }
-    #endif
     data_recieved = 1;
+              /*
+              buf[0] = "D"; buf[1] = "e"; buf[2] = "c";
+              month = intMonth(buf,0,posLine+3);
+              Serial.print(" Month:");
+              Serial.print(month); */
   }
 }
 
@@ -188,3 +227,43 @@ Content-Length: 1
 Age: 0
 Vary: Accept-Encoding
 */
+
+// Date Functions:
+char bufTime[30] = "";
+char bufMonth[38] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+
+int intPart(uint8_t* in, int iFrom, int iTo){
+  int i=0;
+  while(iFrom < iTo)  // go into assignment loop
+  {
+    bufTime[i++] = in[iFrom++];  // assign them
+  }
+   // now append a terminator
+  bufTime[i] = '\0';
+  return atoi(bufTime);
+}    
+
+int intMonth(uint8_t* in, int iFrom, int iTo){
+  int i=0;
+  int m=0;
+  while(iFrom < iTo)  // go into assignment loop
+  {
+    bufTime[i++] = in[iFrom++];  // assign them
+  }
+  for(int j = 0; j<36; j=j+3)
+  {
+    m++;
+    if (bufMonth[j] != bufTime[0]) {continue;}
+    if (bufMonth[j+1] != bufTime[1]) {continue;}
+    if (bufMonth[j+2] != bufTime[2]) {continue;}
+    return m; // or return i+1, depending on what you want
+  }
+  return 0;
+}
+
+// Display functions:
+char* datetimeString(unsigned long t){
+  sprintf(bufTime,"%4d-%02d-%02dT%02d:%02d:%02d\0", year(t), month(t), day(t), hour(t), minute(t), second(t)); 
+  return bufTime;
+}
+
