@@ -69,13 +69,23 @@
   #define DEBUG_PRINTDEC(x)
   #define DEBUG_PRINTLN(x)
 #endif 
+
 //---------------------------------------------------------------------
 // RF12 link - JeeLabs
 //---------------------------------------------------------------------
 #include <Ports.h>
 #include <RF12.h>
+//---------------------------------------------------------------------
+// Ethernet - Andrew Lindsay
+//---------------------------------------------------------------------
+#include <EtherShield.h>
+#include <EEPROM.h>
+#include <Time.h>          // For time sync
+#include "Config.h"
+#include <MemoryFree.h>    // To check memory problems.
 
 #define EMONTX                 // Used by status LED
+///#define RF
 
 #define USELEDSEG
 #ifdef USELEDSEG
@@ -95,12 +105,6 @@
   // Pass our oneWire reference to Dallas Temperature. 
   DallasTemperature sensors(&oneWire);
 #endif
-
-#define MYNODE 2            // node ID 30 reserved for base station
-#define freq RF12_868MHZ     // frequency
-#define group 5            // network group 
-
-float gasKWHM3 = 11.13;   // From gas bill 
 
 // The RF12 data payload - a neat way of packaging data when sending via RF - JeeLabs
 typedef struct
@@ -137,16 +141,8 @@ public:
 };
 PacketBuffer str;
 
-//---------------------------------------------------------------------
-// Ethernet - Andrew Lindsay
-//---------------------------------------------------------------------
-#include <EtherShield.h>
+// Ethernet config:
 byte mac[6] =     { 0x04,0x13,0x31,0x13,0x05,0x22};           // Unique mac address - must be unique on your local network
-
-#define PACHUBE_VHOST "api.pachube.com"
-#define PACHUBEAPIKEY "X-PachubeApiKey: 3VVQ2tTUXwV4agMe5HW3b7Ya9rWzJocSMZHa7FbFKbc" 
-#define PACHUBEAPIURL "/v2/feeds/19886.csv"
-
 byte server[4] = {173,203,98,29};
 
 //---------------------------------------------------------------------
@@ -156,10 +152,19 @@ int dataReady=0;                                                  // is set to 1
 unsigned long lastRF;                                             // used to check for RF recieve failures
 int post_count;                                                   // used to count number of ethernet posts that dont recieve a reply
 
-int pulsePrev=-1;                    // Counters
-///long pulseStart=-1;
-long pulseStart=869;
-unsigned long timePrev;
+int pulsePrev=0;           // Counters
+long pulseStart=0;
+int pulseHour[24];
+unsigned long timePrev;    // Last times
+int iDay=0;
+int iHour=-1;
+int iTest = 0;             // For testing a steady rate. 
+//iTest = 2;
+unsigned long milPachube;
+#define milPachubeInterval 30000L  // Don't send data more frequently. 30 sec
+
+// Watts config:
+float gasKWHM3 = 11.13;   // From gas bill 
 
 //---------------------------------------------------------------------
 // Setup
@@ -176,7 +181,9 @@ void setup()
   
   ethernet_setup_dhcp(mac,server,80,8); // Last two: PORT and SPI PIN: 8 for Nanode, 10 for nuelectronics
   
+  #ifdef RF
   rf12_initialize(MYNODE, freq,group);
+  #endif
   lastRF = millis()-40000;                                        // setting lastRF back 40s is useful as it forces the ethernet code to run straight away
                                                                   // which means we dont have to wait to see if its working
   pinMode(6, OUTPUT);
@@ -191,6 +198,26 @@ void setup()
   #ifdef ONEWIRE
     sensors.begin();  // Enable One Wire.
   #endif
+  
+  // Setup initial counters
+  if (true) {
+    pulseStart = EEPROMReadInt(24*2);
+    iDay = EEPROMReadInt(25*2);
+    for(int h = 0; h<24; h++)
+    {
+      pulseHour[h] = EEPROMReadInt(h*2);  
+    }
+  } else {
+    // For intraday testing
+    pulseStart = 4000;
+    EEPROMWriteInt(24*2,pulseStart);
+    iDay = 29;
+    EEPROMWriteInt(25*2,iDay);
+  }
+  milPachube = millis();
+  
+  DEBUG_PRINT(freeMemory());
+  DEBUG_PRINTLN("=memory");
 }
 
 //-----------------------------------------------------------------------
@@ -206,6 +233,7 @@ void loop()
   //---------------------------------------------------------------------
   // On data receieved from rf12
   //---------------------------------------------------------------------
+  #ifdef RF
   if (rf12_recvDone() && rf12_crc == 0 && (rf12_hdr & RF12_HDR_CTL) == 0) 
   {
     //digitalWrite(6,LOW);                                         // Flash LED on recieve ON
@@ -217,14 +245,12 @@ void loop()
     //digitalWrite(6,HIGH);                                          // Flash LED on recieve OFF
     ledStatus(false);
   }
-  
+  #endif
+
   ethernet_ready_dhcp();               // Keep DHCP alive
   //----------------------------------------
   // 2) Send the data
   //----------------------------------------
-  //if (ethernet_ready_dhcp() && dataReady==1)                     // If ethernet and data is ready: send data
-  if (dataReady==1)                     // If data is ready: display & send data
-  {
     /* Datastreams:
 0 = Gas, KW
 1 = Indoor Temperature, Celcius
@@ -233,22 +259,16 @@ void loop()
 4 = Pulses, count
 5 = Meter Reading, m3
 6 = kWh for the day
+7 = kWh for the last 24 hours
 */
+
+  if ((dataReady==1) || ((millis() - milPachube) > milPachubeInterval)) {
+    milPachube = millis();
+        
     str.reset();
     str.print("3,");
     post_count++;
     str.print(post_count);
-
-    float battVal = (float)emontx.supplyV * 3.3 / (float)1024;
-    int integer = floor(battVal);
-    int mantissa = floor(1000.0f*(battVal- integer));
-    str.print("\r\n2,");
-    str.print(integer);
-    str.print(".");
-    str.print(mantissa);
-
-    str.print("\r\n4,");
-    str.print(emontx.pulse);
 
     // Internal Temperature.
     #ifdef ONEWIRE
@@ -263,58 +283,98 @@ void loop()
         str.print(fString);
       }
     #endif
-
-    float kW;
-    unsigned long timeDiff;
-    int iTest;
     
-    // For testing:
-    iTest = 0;
-    
-    if (pulsePrev != -1)
+    if (dataReady==1)                     // If data is ready: display & send data
     {
-      timeDiff = (millis() - timePrev);
-      DEBUG_PRINT("Diff Time:");
-      DEBUG_PRINT(timeDiff);
-      DEBUG_PRINT(" Pulse:");
-      DEBUG_PRINT(emontx.pulse - pulsePrev);      
-      kW = (emontx.pulse - pulsePrev + iTest) * gasKWHM3 * 3600 * 1000 / (timeDiff) / 100;
-      DEBUG_PRINT(" kW:");
-      DEBUG_PRINTLN(kW);
-      ftoa(fString, kW, 1);
-      str.print("\r\n0,");
+      float battVal = (float)emontx.supplyV * 3.3 / (float)1024;
+      ftoa(fString, battVal, 3);
+      str.print("\r\n2,");
       str.print(fString);
-    }
-    pulsePrev = emontx.pulse;
-    timePrev = millis();
-
-    if (pulseStart == -1)
-    {
-      pulseStart = emontx.pulse;
-    }
-    kW = (emontx.pulse - pulseStart) * gasKWHM3 / 100;
-    DEBUG_PRINT(" kW:");
-    DEBUG_PRINTLN(kW);
-    ftoa(fString, kW, 1);
-    str.print("\r\n6,");
-    str.print(fString);
-
-    #ifdef USELEDSEG
-      // Display on 7 segment LED
-      LEDSEG.print("v\0");  // Clear contents
-      if (kW < 100) {
-        LedSeg_DecimalPlace(1);
-        sprintf(ledBuf, "d%3s", ftoa(fString, kW*10, 0));
-      } else {
-        LedSeg_DecimalPlace(0);
-        sprintf(ledBuf, "d%3s", ftoa(fString, kW, 0));
+  
+      str.print("\r\n4,");
+      str.print(emontx.pulse);
+  
+      unsigned long timeDiff;
+      float kW;
+      float kWhDay;
+      float kWh24;
+      
+      if (pulsePrev != 0)
+      {
+        timeDiff = (millis() - timePrev);
+        DEBUG_PRINT("Diff Time:");
+        DEBUG_PRINT(timeDiff);
+        DEBUG_PRINT(" Pulse:");
+        DEBUG_PRINT(emontx.pulse - pulsePrev);      
+        kW = (emontx.pulse - pulsePrev + iTest) * gasKWHM3 * 3600 * 1000 / (timeDiff) / 100;
+        DEBUG_PRINT(" kW:");
+        DEBUG_PRINTLN(kW);
+        ftoa(fString, kW, 1);
+        str.print("\r\n0,");
+        str.print(fString);
       }
-      LEDSEG.print(ledBuf);
-      DEBUG_PRINTLN(ledBuf);
-    #endif
-    
+  
+      if (pulseStart == 0)
+      {
+        pulsePrev = emontx.pulse;
+        pulseStart = emontx.pulse;
+      }
+      if ((timeStatus() == timeSet && day() != iDay))
+      {
+        DEBUG_PRINTLN("New day");
+        iDay = day();
+        pulseStart = pulsePrev;
+        EEPROMWriteInt(24*2,pulseStart);
+        EEPROMWriteInt(25*2,iDay);
+      }
+      kWhDay = (emontx.pulse - pulseStart) * gasKWHM3 / 100;
+      DEBUG_PRINT(" kWh day:");
+      DEBUG_PRINTLN(kWhDay);
+      ftoa(fString, kWhDay, 1);
+      str.print("\r\n6,");
+      str.print(fString);
+  
+      int h = hour();
+      if (timeStatus() == timeSet && h != iHour)
+      {
+        // Set the value for the previous hour.
+        DEBUG_PRINTLN("New hour");
+        if (h == 0) {iHour = 23;}
+        else {iHour = h-1;}
+        EEPROMWriteInt(iHour*2,pulsePrev);
+        iHour = h;
+      }
+      if (pulseHour[h] == 0) {pulseHour[h] = pulseStart;}
+      // Use the value from the 
+      kWh24 = (emontx.pulse - pulseHour[h]) * gasKWHM3 / 100;
+      DEBUG_PRINT(" kWh 24 hours:");
+      DEBUG_PRINTLN(kWh24);
+      ftoa(fString, kWh24, 1);
+      str.print("\r\n7,");
+      str.print(fString);
+  
+      #ifdef USELEDSEG
+        // Display on 7 segment LED
+        LEDSEG.print("v\0");  // Clear contents
+        if (kWhDay < 100) {
+          LedSeg_DecimalPlace(1);
+          sprintf(ledBuf, "d%3s", ftoa(fString, kWhDay*10, 0));
+          ///sprintf(ledBuf, "r%3s", ftoa(fString, kWh24*10, 0));
+        } else {
+          LedSeg_DecimalPlace(0);
+          sprintf(ledBuf, "d%3s", ftoa(fString, kWhDay, 0));
+          ///sprintf(ledBuf, "r%3s", ftoa(fString, kWh24, 0));
+        }
+        LEDSEG.print(ledBuf);
+        DEBUG_PRINTLN(ledBuf);
+      #endif
+      
+      pulsePrev = emontx.pulse;
+      timePrev = millis();
+    }
+
     #ifdef DEBUG
-    Serial.println(str.buf);                                        // Print final json string to terminal
+      Serial.println(str.buf);                                        // Print final json string to terminal
     #endif
     
     if (ethernet_ready_dhcp())
@@ -322,7 +382,7 @@ void loop()
       ledStatus(true);
       ethernet_send_post(PSTR(PACHUBEAPIURL),PSTR(PACHUBE_VHOST),PSTR(PACHUBEAPIKEY), PSTR("PUT "),str.buf);
       #ifdef DEBUG
-      Serial.println("sent"); 
+        Serial.println("sent"); 
       #endif
       ledStatus(false);
     }
@@ -386,5 +446,21 @@ void ledStatus(int On)
   #endif
 }
 
+//This function will write a 2 byte integer to the eeprom at the specified address and address + 1
+void EEPROMWriteInt(int p_address, int p_value)
+{
+  byte lowByte = ((p_value >> 0) & 0xFF);
+  byte highByte = ((p_value >> 8) & 0xFF);
 
+  EEPROM.write(p_address, lowByte);
+  EEPROM.write(p_address + 1, highByte);
+}
 
+//This function will read a 2 byte integer from the eeprom at the specified address and address + 1
+unsigned int EEPROMReadInt(int p_address)
+{
+  byte lowByte = EEPROM.read(p_address);
+  byte highByte = EEPROM.read(p_address + 1);
+
+  return ((lowByte << 0) & 0xFF) + ((highByte << 8) & 0xFF00);
+}

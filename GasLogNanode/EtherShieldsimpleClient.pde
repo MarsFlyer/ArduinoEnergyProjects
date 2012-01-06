@@ -189,7 +189,8 @@ void browserresult_callback(uint8_t statuscode,uint16_t datapos)
               int yr = intPart(buf,posLine+18,posLine+22);
               setTime(hr,min,sec,day,month,yr);
               #ifdef DEBUG
-                Serial.print(" Sync:");
+                Serial.println("");
+                Serial.print(">sync:");
                 Serial.print(datetimeString(now()));
               #endif
             }
@@ -201,11 +202,6 @@ void browserresult_callback(uint8_t statuscode,uint16_t datapos)
       pos++;
     }
     data_recieved = 1;
-              /*
-              buf[0] = "D"; buf[1] = "e"; buf[2] = "c";
-              month = intMonth(buf,0,posLine+3);
-              Serial.print(" Month:");
-              Serial.print(month); */
   }
 }
 
@@ -228,42 +224,44 @@ Age: 0
 Vary: Accept-Encoding
 */
 
-// Date Functions:
-char bufTime[30] = "";
-char bufMonth[38] = "JanFebMarAprMayJunJulAugSepOctNovDec";
-
-int intPart(uint8_t* in, int iFrom, int iTo){
-  int i=0;
-  while(iFrom < iTo)  // go into assignment loop
-  {
-    bufTime[i++] = in[iFrom++];  // assign them
+#ifdef DATESET
+  // Date Functions:
+  char bufTime[30] = "";
+  char bufMonth[38] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  
+  int intPart(uint8_t* in, int iFrom, int iTo){
+    int i=0;
+    while(iFrom < iTo)  // go into assignment loop
+    {
+      bufTime[i++] = in[iFrom++];  // assign them
+    }
+     // now append a terminator
+    bufTime[i] = '\0';
+    return atoi(bufTime);
+  }    
+  
+  int intMonth(uint8_t* in, int iFrom, int iTo){
+    int i=0;
+    int m=0;
+    while(iFrom < iTo)  // go into assignment loop
+    {
+      bufTime[i++] = in[iFrom++];  // assign them
+    }
+    for(int j = 0; j<36; j=j+3)
+    {
+      m++;
+      if (bufMonth[j] != bufTime[0]) {continue;}
+      if (bufMonth[j+1] != bufTime[1]) {continue;}
+      if (bufMonth[j+2] != bufTime[2]) {continue;}
+      return m; // or return i+1, depending on what you want
+    }
+    return 0;
   }
-   // now append a terminator
-  bufTime[i] = '\0';
-  return atoi(bufTime);
-}    
-
-int intMonth(uint8_t* in, int iFrom, int iTo){
-  int i=0;
-  int m=0;
-  while(iFrom < iTo)  // go into assignment loop
-  {
-    bufTime[i++] = in[iFrom++];  // assign them
+  
+  // Display functions:
+  char* datetimeString(unsigned long t){
+    sprintf(bufTime,"%4d-%02d-%02dT%02d:%02d:%02d\0", year(t), month(t), day(t), hour(t), minute(t), second(t)); 
+    return bufTime;
   }
-  for(int j = 0; j<36; j=j+3)
-  {
-    m++;
-    if (bufMonth[j] != bufTime[0]) {continue;}
-    if (bufMonth[j+1] != bufTime[1]) {continue;}
-    if (bufMonth[j+2] != bufTime[2]) {continue;}
-    return m; // or return i+1, depending on what you want
-  }
-  return 0;
-}
-
-// Display functions:
-char* datetimeString(unsigned long t){
-  sprintf(bufTime,"%4d-%02d-%02dT%02d:%02d:%02d\0", year(t), month(t), day(t), hour(t), minute(t), second(t)); 
-  return bufTime;
-}
+#endif
 
