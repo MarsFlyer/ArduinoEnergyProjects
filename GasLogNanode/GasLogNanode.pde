@@ -60,15 +60,10 @@
 // Last update: 12th of November 2011
 //--------------------------------------------------------------------------------------
 #define DEBUG
-#ifdef DEBUG
-  #define DEBUG_PRINT(x)      Serial.print (x)
-  #define DEBUG_PRINTDEC(x)   Serial.print (x, DEC)
-  #define DEBUG_PRINTLN(x)    Serial.println (x)
-#else
-  #define DEBUG_PRINT(x)
-  #define DEBUG_PRINTDEC(x)
-  #define DEBUG_PRINTLN(x)
-#endif 
+#define LEDLOW            // Used by status LED
+#define RF
+#define ONEWIRE 1
+#define USELEDSEG         // 7 SEgment LED display
 
 //---------------------------------------------------------------------
 // RF12 link - JeeLabs
@@ -84,17 +79,12 @@
 #include "Config.h"
 #include <MemoryFree.h>    // To check memory problems.
 
-#define EMONTX                 // Used by status LED
-///#define RF
-
-#define USELEDSEG
 #ifdef USELEDSEG
   #include <NewSoftSerial.h>
   NewSoftSerial LEDSEG(4, 5);    // For 7 Segment LED display rx (not used), tx (used) 
 #endif 
 
 // For one-wire:
-#define ONEWIRE 1
 #ifdef ONEWIRE
   #include <OneWire.h>            // Internal temperature.
   #include <DallasTemperature.h>
@@ -105,6 +95,16 @@
   // Pass our oneWire reference to Dallas Temperature. 
   DallasTemperature sensors(&oneWire);
 #endif
+
+#ifdef DEBUG
+  #define DEBUG_PRINT(x)      Serial.print (x)
+  #define DEBUG_PRINTDEC(x)   Serial.print (x, DEC)
+  #define DEBUG_PRINTLN(x)    Serial.println (x)
+#else
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTDEC(x)
+  #define DEBUG_PRINTLN(x)
+#endif 
 
 // The RF12 data payload - a neat way of packaging data when sending via RF - JeeLabs
 typedef struct
@@ -429,7 +429,7 @@ char *ftoa(char *a, double f, int precision)
 void ledStatus(int On)
 {
   //On EmonTx input gets inverted by buffer
-  #ifdef EMONTX
+  #ifdef LEDLOW
     if (On == false) {
       digitalWrite(6,HIGH);
     }
