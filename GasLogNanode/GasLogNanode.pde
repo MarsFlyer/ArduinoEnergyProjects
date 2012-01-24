@@ -143,7 +143,7 @@ PacketBuffer str;
 
 // Ethernet config:
 byte mac[6] =     { 0x04,0x13,0x31,0x13,0x05,0x22};           // Unique mac address - must be unique on your local network
-byte server[4] = {173,203,98,29};
+byte server[4] = {173,203,98,29};    // Pachube IP, should use DNS!
 
 //---------------------------------------------------------------------
 
@@ -155,16 +155,32 @@ int post_count;                                                   // used to cou
 int pulsePrev=0;           // Counters
 long pulseStart=0;
 int pulseHour[24];
+unsigned long timeYear;     // The start of the year in hours, using Unix time
 unsigned long timePrev;    // Last times
 int iDay=0;
 int iHour=-1;
 int iTest = 0;             // For testing a steady rate. 
 //iTest = 2;
+
+// Timing globals:
 unsigned long milPachube;
-#define milPachubeInterval 30000L  // Don't send data more frequently. 30 sec
+#define milPachubeInterval 25000L  // Don't send data more frequently. 25 sec
+unsigned long milNext;
+#define milMinInterval 60000L  // Send indoor temperature if no gas daat. 60 sec
+unsigned long milDisplay;
+#define milDisplayInterval 20000L  // Rotating LED segment display. 20 sec
+int iDisplay;  // What to show.
 
 // Watts config:
 float gasKWHM3 = 11.13;   // From gas bill 
+
+// Data globals
+float fTemperature;
+float kW;
+float kWhDay;
+float kWh24;
+char ledBuf[5];
+char fString[10];
 
 //---------------------------------------------------------------------
 // Setup
@@ -215,6 +231,8 @@ void setup()
     EEPROMWriteInt(25*2,iDay);
   }
   milPachube = millis();
+  milNext = millis() + milMinInterval;
+  milDisplay = millis() + milDisplayInterval;
   
   DEBUG_PRINT(freeMemory());
   DEBUG_PRINTLN("=memory");
@@ -225,29 +243,66 @@ void setup()
 //-----------------------------------------------------------------------
 void loop()
 {
-  char ledBuf[5];
-  char fString[10];
-
   //digitalWrite(6,HIGH);    //turn inidicator LED off! yes off! input gets inverted by buffer
   //ledStatus(false);
   //---------------------------------------------------------------------
   // On data receieved from rf12
   //---------------------------------------------------------------------
   #ifdef RF
-  if (rf12_recvDone() && rf12_crc == 0 && (rf12_hdr & RF12_HDR_CTL) == 0) 
+  if (rf12_recvDone())
   {
-    //digitalWrite(6,LOW);                                         // Flash LED on recieve ON
-    ledStatus(true);
-    emontx=*(Payload*) rf12_data;                                 // Get the payload
-
-    dataReady = 1;                                                // Ok, data is ready
-    lastRF = millis();                                            // reset lastRF timer
-    //digitalWrite(6,HIGH);                                          // Flash LED on recieve OFF
-    ledStatus(false);
+    DEBUG_PRINT(".");
+    if (rf12_crc == 0 && (rf12_hdr & RF12_HDR_CTL) == 0)
+    { 
+      ledStatus(true);                        // Turn LED on to show receiving data
+      emontx=*(Payload*) rf12_data;                                 // Get the payload
+  
+      dataReady = 1;                                                // Ok, data is ready
+      lastRF = millis();                                            // reset lastRF timer
+    }
   }
   #endif
 
-  ethernet_ready_dhcp();               // Keep DHCP alive
+  // If no readings then send the internal temperature anyway.
+  if ((dataReady==1) || (millis() > milNext))
+  {
+    DEBUG_PRINTLN("");
+    DEBUG_PRINT("Since:");
+    DEBUG_PRINTLN(millis()+milMinInterval-milNext);
+    if (millis() > milNext) {
+      ledStatus(false);                    // Turn LED off to show no RF data.
+    }
+    milNext = millis() + milMinInterval;
+    ethernet_ready_dhcp();               // Keep DHCP alive
+    // Send data to Pachube, but don't repeat too soon.
+    if ((millis() - milPachube) > milPachubeInterval) {
+      Pachube_Send();
+      milPachube = millis(); 
+      dataReady = 0;                        // reset dataReady
+    }
+  }
+  if (millis() > milDisplay)
+  {
+    milDisplay = millis() + milDisplayInterval;
+    iDisplay++;
+    if (iDisplay > 2) {iDisplay = 0;}
+    switch( iDisplay )
+    {
+      case 0: {
+        DisplayData ("t", kWhDay);
+        break;}
+      case 1: {
+        DisplayData ("d", kWh24);
+        break;}
+      case 2: {
+        DisplayData ("C", fTemperature);
+        break;}
+    }
+  }
+}
+
+void Pachube_Send()
+{
   //----------------------------------------
   // 2) Send the data
   //----------------------------------------
@@ -262,169 +317,158 @@ void loop()
 7 = kWh for the last 24 hours
 */
 
-  if ((dataReady==1) || ((millis() - milPachube) > milPachubeInterval)) {
-    milPachube = millis();
-        
-    str.reset();
-    str.print("3,");
-    post_count++;
-    str.print(post_count);
+  str.reset();
+  str.print("3,");
+  post_count++;
+  str.print(post_count);
 
-    // Internal Temperature.
-    #ifdef ONEWIRE
-      sensors.requestTemperatures(); // Send the command to get temperatures
-      float fTemperature = -100;
-      fTemperature = sensors.getTempCByIndex(0);  // First (only) sensor.
-      if (fTemperature > -100) {
-        DEBUG_PRINT("TEMPINT=");
-        DEBUG_PRINTLN(fTemperature);
-        ftoa(fString, fTemperature, 1);
-        str.print("\r\n1,");
-        str.print(fString);
-      }
-    #endif
+  // Internal Temperature.
+  #ifdef ONEWIRE
+    sensors.requestTemperatures(); // Send the command to get temperatures
+    fTemperature = -100;
+    fTemperature = sensors.getTempCByIndex(0);  // First (only) sensor.
+    if (fTemperature > -100 && fTemperature < 100) {
+      DEBUG_PRINT("TEMPINT=");
+      DEBUG_PRINTLN(fTemperature);
+      dtostrf(fTemperature, 3, 1, fString);
+      str.print("\r\n1,");
+      str.print(fString);
+    }
+  #endif
+  
+  if (dataReady==1)                     // If data is ready: calculate data
+  {
+    float battVal = (float)emontx.supplyV * 3.3 / (float)1024;
+    dtostrf(battVal, 3, 1, fString);
+    str.print("\r\n2,");
+    str.print(fString);
+
+    str.print("\r\n4,");
+    str.print(emontx.pulse);
+
+    unsigned long timeDiff;
     
-    if (dataReady==1)                     // If data is ready: display & send data
+    if (pulsePrev != 0)
     {
-      float battVal = (float)emontx.supplyV * 3.3 / (float)1024;
-      ftoa(fString, battVal, 3);
-      str.print("\r\n2,");
+      timeDiff = (millis() - timePrev);
+      DEBUG_PRINT("Diff Time:");
+      DEBUG_PRINT(timeDiff);
+      DEBUG_PRINT(" Pulse:");
+      DEBUG_PRINT(emontx.pulse - pulsePrev);      
+      kW = (emontx.pulse - pulsePrev + iTest) * gasKWHM3 * 3600 * 1000 / (timeDiff) / 100;
+      DEBUG_PRINT(" kW:");
+      DEBUG_PRINTLN(kW);
+      dtostrf(kW, 3, 1, fString);
+      str.print("\r\n0,");
       str.print(fString);
-  
-      str.print("\r\n4,");
-      str.print(emontx.pulse);
-  
-      unsigned long timeDiff;
-      float kW;
-      float kWhDay;
-      float kWh24;
-      
-      if (pulsePrev != 0)
-      {
-        timeDiff = (millis() - timePrev);
-        DEBUG_PRINT("Diff Time:");
-        DEBUG_PRINT(timeDiff);
-        DEBUG_PRINT(" Pulse:");
-        DEBUG_PRINT(emontx.pulse - pulsePrev);      
-        kW = (emontx.pulse - pulsePrev + iTest) * gasKWHM3 * 3600 * 1000 / (timeDiff) / 100;
-        DEBUG_PRINT(" kW:");
-        DEBUG_PRINTLN(kW);
-        ftoa(fString, kW, 1);
-        str.print("\r\n0,");
-        str.print(fString);
-      }
-  
-      if (pulseStart == 0)
-      {
-        pulsePrev = emontx.pulse;
-        pulseStart = emontx.pulse;
-      }
-      if ((timeStatus() == timeSet && day() != iDay))
-      {
-        DEBUG_PRINTLN("New day");
-        iDay = day();
-        pulseStart = pulsePrev;
-        EEPROMWriteInt(24*2,pulseStart);
-        EEPROMWriteInt(25*2,iDay);
-      }
-      kWhDay = (emontx.pulse - pulseStart) * gasKWHM3 / 100;
-      DEBUG_PRINT(" kWh day:");
-      DEBUG_PRINTLN(kWhDay);
-      ftoa(fString, kWhDay, 1);
-      str.print("\r\n6,");
-      str.print(fString);
-  
-      int h = hour();
-      if (timeStatus() == timeSet && h != iHour)
-      {
-        // Set the value for the previous hour.
-        DEBUG_PRINTLN("New hour");
-        if (h == 0) {iHour = 23;}
-        else {iHour = h-1;}
-        EEPROMWriteInt(iHour*2,pulsePrev);
-        iHour = h;
-      }
-      if (pulseHour[h] == 0) {pulseHour[h] = pulseStart;}
-      // Use the value from the 
-      kWh24 = (emontx.pulse - pulseHour[h]) * gasKWHM3 / 100;
-      DEBUG_PRINT(" kWh 24 hours:");
-      DEBUG_PRINTLN(kWh24);
-      ftoa(fString, kWh24, 1);
-      str.print("\r\n7,");
-      str.print(fString);
-  
-      #ifdef USELEDSEG
-        // Display on 7 segment LED
-        LEDSEG.print("v\0");  // Clear contents
-        if (kWhDay < 100) {
-          LedSeg_DecimalPlace(1);
-          sprintf(ledBuf, "d%3s", ftoa(fString, kWhDay*10, 0));
-          ///sprintf(ledBuf, "r%3s", ftoa(fString, kWh24*10, 0));
-        } else {
-          LedSeg_DecimalPlace(0);
-          sprintf(ledBuf, "d%3s", ftoa(fString, kWhDay, 0));
-          ///sprintf(ledBuf, "r%3s", ftoa(fString, kWh24, 0));
-        }
-        LEDSEG.print(ledBuf);
-        DEBUG_PRINTLN(ledBuf);
-      #endif
-      
+    }
+
+    if (pulseStart == 0)
+    {
       pulsePrev = emontx.pulse;
-      timePrev = millis();
+      pulseStart = emontx.pulse;
     }
-
-    #ifdef DEBUG
-      Serial.println(str.buf);                                        // Print final json string to terminal
-    #endif
-    
-    if (ethernet_ready_dhcp())
+    if ((timeStatus() == timeSet && day() != iDay))
     {
-      ledStatus(true);
-      ethernet_send_post(PSTR(PACHUBEAPIURL),PSTR(PACHUBE_VHOST),PSTR(PACHUBEAPIKEY), PSTR("PUT "),str.buf);
-      #ifdef DEBUG
-        Serial.println("sent"); 
-      #endif
-      ledStatus(false);
+      DEBUG_PRINTLN("New day");
+      iDay = day();
+      pulseStart = pulsePrev;
+      EEPROMWriteInt(24*2,pulseStart);
+      EEPROMWriteInt(25*2,iDay);
     }
-    dataReady = 0;                        // reset dataReady
+    kWhDay = (emontx.pulse - pulseStart) * gasKWHM3 / 100;
+    DEBUG_PRINT(" kWh day:");
+    DEBUG_PRINTLN(kWhDay);
+    dtostrf(kWhDay, 3, 1, fString);
+    str.print("\r\n6,");
+    str.print(fString);
+
+    int h = hour();
+    if (timeStatus() == timeSet && h != iHour)
+    {
+      // Set the value for the previous hour.
+      DEBUG_PRINTLN("New hour");
+      if (h == 0) {iHour = 23;}
+      else {iHour = h-1;}
+      EEPROMWriteInt(iHour*2,pulsePrev);
+      iHour = h;
+      if (timeYear == 0) {
+        tmElements_t tmYear;
+        tmYear.Year = year(now());
+        tmYear.Month = 1;
+        tmYear.Day = 1;
+        timeYear = makeTime(tmYear)/7200;
+      }
+      unsigned int hourNow;
+      hourNow = (now()-timeYear)/86400L;
+      DEBUG_PRINT(" Hours:");
+      DEBUG_PRINTLN(hourNow);
+      EEPROMWriteInt(iHour*2+25,hourNow);
+    }
+    if (pulseHour[h] == 0) {pulseHour[h] = pulseStart;}
+    // Use the value from the 
+    kWh24 = (emontx.pulse - pulseHour[h]) * gasKWHM3 / 100;
+    DEBUG_PRINT(" kWh 24 hours:");
+    DEBUG_PRINTLN(kWh24);
+    dtostrf(kWh24, 3, 1, fString);
+    str.print("\r\n7,");
+    str.print(fString);
+
+    pulsePrev = emontx.pulse;
+    timePrev = millis();
   }
+
+  #ifdef DEBUG
+    Serial.println(str.buf);                                        // Print final json string to terminal
+  #endif
   
+  if (ethernet_ready_dhcp())
+  {
+    ///ledStatus(true);
+    ethernet_send_post(PSTR(PACHUBEAPIURL),PSTR(PACHUBE_VHOST),PSTR(PACHUBEAPIKEY), PSTR("PUT "),str.buf);
+    #ifdef DEBUG
+      Serial.println("sent"); 
+    #endif
+    ///ledStatus(false);
+  }
+  DEBUG_PRINTLN(datetimeString(now())); 
+  DEBUG_PRINT(freeMemory());
+  DEBUG_PRINTLN("=memory");
+}
+
+void DisplayData (char *sDisplay, float fDisplay)
+{
+  #ifdef USELEDSEG
+    // Display on 7 segment LED
+    LEDSEG.print("v\0");  // Clear contents
+    if (fDisplay < 100) {
+      LedSeg_DecimalPlace(1);
+      sprintf(ledBuf, "%1s%3s", sDisplay, dtostrf(fDisplay*10, 3, 0, fString));
+    } else {
+      LedSeg_DecimalPlace(0);
+      sprintf(ledBuf, "%1s%3s", sDisplay, dtostrf(fDisplay, 3, 1, fString));
+    }
+    DEBUG_PRINT("LED=");
+    DEBUG_PRINTLN(ledBuf);
+    LEDSEG.print(ledBuf);
+  #endif
 }
 
 #ifdef USELEDSEG
-  void LedSeg_DecimalPlace (int precision) {
-    LEDSEG.print("w");  // Set decimal places etc.
-    // Bits: 00, Apos, Colon, 1234., 123.4, 12.34, 1.234 
-    if (precision == 0) {
-      LEDSEG.print(B00000000,BYTE);  
-    } else if (precision == 1) {
-      LEDSEG.print(B00000100,BYTE);
-    } else if (precision == 2) {
-      LEDSEG.print(B00000010,BYTE);
-    } else if (precision == 3) {
-      LEDSEG.print(B00000001,BYTE);
-    }
+void LedSeg_DecimalPlace (int precision) {
+  LEDSEG.print("w");  // Set decimal places etc.
+  // Bits: 00, Apos, Colon, 1234., 123.4, 12.34, 1.234 
+  if (precision == 0) {
+    LEDSEG.print(B00000000,BYTE);  
+  } else if (precision == 1) {
+    LEDSEG.print(B00000100,BYTE);
+  } else if (precision == 2) {
+    LEDSEG.print(B00000010,BYTE);
+  } else if (precision == 3) {
+    LEDSEG.print(B00000001,BYTE);
   }
-#endif
-
-// Float support is hard on arduinos
-// (http://www.arduino.cc/cgi-bin/yabb2/YaBB.pl?num=1164927646) with tweaks
-char *ftoa(char *a, double f, int precision)
-{
-  //TEST_PRINTLN(f);
-  long p[] = {0,10,100,1000,10000,100000,1000000,10000000,100000000};
-  char *ret = a;
-  long heiltal = (long)f;
-  
-  itoa(heiltal, a, 10);
-  while (*a != '\0') a++;
-  if (precision > 0) {
-    *a++ = '.';
-    long desimal = abs((long)((f - heiltal) * p[precision]));
-    itoa(desimal, a, 10);
-  }
-  return ret;
 }
+#endif
 
 void ledStatus(int On)
 {
