@@ -136,7 +136,7 @@ public:
     virtual void write(uint8_t ch)
         { if (fill < sizeof buf) buf[fill++] = ch; }
     byte fill;
-    char buf[150];
+    char buf[70];
     private:
 };
 PacketBuffer str;
@@ -148,15 +148,18 @@ byte server[4] = {173,203,98,29};    // Pachube IP, should use DNS!
 //---------------------------------------------------------------------
 
 // Flow control varaiables
+int bEthernet;
 int dataReady=0;                                                  // is set to 1 when there is data ready to be sent
-unsigned long lastRF;                                             // used to check for RF recieve failures
+unsigned long milRF;                                             // used to check for RF recieve failures
 int post_count;                                                   // used to count number of ethernet posts that dont recieve a reply
 
 int pulsePrev=0;           // Counters
 long pulseStart=0;
-int pulseHour[24];
+int pulseHour[24];         // Holds the pulse count at the start of each hour
+int hoursHour[24];         // Holds the time in hours (since the start of the year)
 unsigned long timeYear;     // The start of the year in hours, using Unix time
 unsigned long timePrev;    // Last times
+tmElements_t tm;
 int iDay=0;
 int iHour=-1;
 int iTest = 0;             // For testing a steady rate. 
@@ -188,54 +191,71 @@ char fString[10];
 void setup()
 {
   Serial.begin(9600);
-  Serial.println("Emonbase:NanodeRF ctonly");
+  Serial.println("GasLogNanode");
   Serial.print("Node: "); Serial.print(MYNODE); 
-  Serial.print(" Freq: "); Serial.print("433Mhz"); 
-  Serial.print(" Network group: "); Serial.println(group);
-  Serial.print("Posting to "); printIP(server); Serial.print(" "); Serial.println(PACHUBE_VHOST);
-
+  ///Serial.print(" Freq: "); Serial.print("433Mhz"); 
+  Serial.print(" Group: "); Serial.println(group);
+  ///Serial.print("Posting to "); printIP(server); Serial.print(" "); Serial.println(PACHUBE_VHOST);
   
   ethernet_setup_dhcp(mac,server,80,8); // Last two: PORT and SPI PIN: 8 for Nanode, 10 for nuelectronics
   
   #ifdef RF
   rf12_initialize(MYNODE, freq,group);
   #endif
-  lastRF = millis()-40000;                                        // setting lastRF back 40s is useful as it forces the ethernet code to run straight away
-                                                                  // which means we dont have to wait to see if its working
+
   pinMode(6, OUTPUT);
   ledStatus(true); delay(1000); ledStatus(false);                // Nanode indicator LED setup, HIGH means off! if LED lights up indicates that Etherent and RFM12 has been initialize
   
   #ifdef USELEDSEG
     LEDSEG.begin(9600);
     LEDSEG.print("z");  // Full brightness
-    LEDSEG.print("gas\0");
+    LEDSEG.print("v\0");  // Clear contents
+    LEDSEG.print("----\0");
   #endif
 
   #ifdef ONEWIRE
     sensors.begin();  // Enable One Wire.
   #endif
   
-  // Setup initial counters
+  // Read initial counters
+  pulseStart = EEPROMReadInt(24*2);
+  iDay = EEPROMReadInt(25*2);
+  DEBUG_PRINTLN("EEPROM data:");
+  for(int h = 0; h<24; h++)
+  {
+    pulseHour[h] = EEPROMReadInt(h*2);
+    hoursHour[h] = EEPROMReadInt(h*2+25);  
+    DEBUG_PRINT(h);
+    DEBUG_PRINT(" ");
+    DEBUG_PRINT(pulseHour[h]);
+    DEBUG_PRINT(" ");
+    DEBUG_PRINTLN(hoursHour[h]);
+  }
+  // For intraday testing
   if (true) {
-    pulseStart = EEPROMReadInt(24*2);
-    iDay = EEPROMReadInt(25*2);
+    ///iDay = 24;
+    unsigned int hrs;
+    hrs = hours(now());
     for(int h = 0; h<24; h++)
     {
-      pulseHour[h] = EEPROMReadInt(h*2);  
+      ///pulseHour[h] = 2000;  
+      hoursHour[h] = hrs;
     }
-  } else {
-    // For intraday testing
+  }
+  // To setup EEPROM
+  if (false) {
     pulseStart = 4000;
     EEPROMWriteInt(24*2,pulseStart);
     iDay = 29;
     EEPROMWriteInt(25*2,iDay);
   }
-  milPachube = millis();
-  milNext = millis() + milMinInterval;
-  milDisplay = millis() + milDisplayInterval;
+  milPachube = millis() - milPachubeInterval; // Use first loop.
+  milNext = millis() + 20000L;   // Give 20 seconds to do DHCP.
+  milDisplay = millis();
+  milRF = millis();
   
-  DEBUG_PRINT(freeMemory());
-  DEBUG_PRINTLN("=memory");
+  DEBUG_PRINT("Mem=");
+  DEBUG_PRINTLN(freeMemory());
 }
 
 //-----------------------------------------------------------------------
@@ -243,8 +263,9 @@ void setup()
 //-----------------------------------------------------------------------
 void loop()
 {
-  //digitalWrite(6,HIGH);    //turn inidicator LED off! yes off! input gets inverted by buffer
-  //ledStatus(false);
+  if (bEthernet != 1) {             // Turned off in DHCP get IP and Date sync in HTML response.
+    ethernet_ready_dhcp();          // Required during DHCP & HTTP. May interfere with RF otherwise.
+  }
   //---------------------------------------------------------------------
   // On data receieved from rf12
   //---------------------------------------------------------------------
@@ -252,30 +273,38 @@ void loop()
   if (rf12_recvDone())
   {
     DEBUG_PRINT(".");
-    if (rf12_crc == 0 && (rf12_hdr & RF12_HDR_CTL) == 0)
+    /// if (rf12_crc == 0 && (rf12_hdr & RF12_HDR_CTL) == 0)
+    if (rf12_crc == 0)
+    ///if (true)   // Ignore checksums! 
     { 
       ledStatus(true);                        // Turn LED on to show receiving data
       emontx=*(Payload*) rf12_data;                                 // Get the payload
   
+      DEBUG_PRINT("Got RF:");
+      DEBUG_PRINTLN(millis()-milRF);
+
       dataReady = 1;                                                // Ok, data is ready
-      lastRF = millis();                                            // reset lastRF timer
+      milRF = millis();                                            // reset milRF timer
     }
   }
   #endif
 
-  // If no readings then send the internal temperature anyway.
+  // If data or no too long since last posting
   if ((dataReady==1) || (millis() > milNext))
   {
-    DEBUG_PRINTLN("");
-    DEBUG_PRINT("Since:");
-    DEBUG_PRINTLN(millis()+milMinInterval-milNext);
+    ethernet_ready_dhcp();     // Check DHCP is still OK.
     if (millis() > milNext) {
       ledStatus(false);                    // Turn LED off to show no RF data.
     }
     milNext = millis() + milMinInterval;
-    ethernet_ready_dhcp();               // Keep DHCP alive
     // Send data to Pachube, but don't repeat too soon.
     if ((millis() - milPachube) > milPachubeInterval) {
+      DEBUG_PRINTLN("");
+      DEBUG_PRINT("Since:");
+      DEBUG_PRINT(millis()+milMinInterval-milNext);
+      DEBUG_PRINT(" Last RF:");
+      DEBUG_PRINTLN(millis()-milRF);
+      bEthernet = 0;  // turn Ethernet on during sending
       Pachube_Send();
       milPachube = millis(); 
       dataReady = 0;                        // reset dataReady
@@ -289,10 +318,10 @@ void loop()
     switch( iDisplay )
     {
       case 0: {
-        DisplayData ("t", kWhDay);
+        DisplayData ("d", kWhDay);
         break;}
       case 1: {
-        DisplayData ("d", kWh24);
+        DisplayData ("r", kWh24);
         break;}
       case 2: {
         DisplayData ("C", fTemperature);
@@ -328,7 +357,7 @@ void Pachube_Send()
     fTemperature = -100;
     fTemperature = sensors.getTempCByIndex(0);  // First (only) sensor.
     if (fTemperature > -100 && fTemperature < 100) {
-      DEBUG_PRINT("TEMPINT=");
+      DEBUG_PRINT("Int=");
       DEBUG_PRINTLN(fTemperature);
       dtostrf(fTemperature, 3, 1, fString);
       str.print("\r\n1,");
@@ -376,6 +405,16 @@ void Pachube_Send()
       EEPROMWriteInt(24*2,pulseStart);
       EEPROMWriteInt(25*2,iDay);
     }
+    // Use the array to find the most appropriate previous pulses.
+    unsigned int pulse;
+    unsigned int hoursNow;
+    hoursNow = hours(now());
+    pulse = pulseValue(0, hoursNow);
+    if (pulse == 0) {pulse = emontx.pulse;}
+    kWhDay = (emontx.pulse - pulse) * gasKWHM3 / 100;
+    DEBUG_PRINT(" kWh day:");
+    DEBUG_PRINTLN(kWhDay);
+
     kWhDay = (emontx.pulse - pulseStart) * gasKWHM3 / 100;
     DEBUG_PRINT(" kWh day:");
     DEBUG_PRINTLN(kWhDay);
@@ -392,18 +431,9 @@ void Pachube_Send()
       else {iHour = h-1;}
       EEPROMWriteInt(iHour*2,pulsePrev);
       iHour = h;
-      if (timeYear == 0) {
-        tmElements_t tmYear;
-        tmYear.Year = year(now());
-        tmYear.Month = 1;
-        tmYear.Day = 1;
-        timeYear = makeTime(tmYear)/7200;
-      }
-      unsigned int hourNow;
-      hourNow = (now()-timeYear)/86400L;
       DEBUG_PRINT(" Hours:");
-      DEBUG_PRINTLN(hourNow);
-      EEPROMWriteInt(iHour*2+25,hourNow);
+      DEBUG_PRINTLN(hoursNow);
+      EEPROMWriteInt(iHour*2+25,hoursNow);
     }
     if (pulseHour[h] == 0) {pulseHour[h] = pulseStart;}
     // Use the value from the 
@@ -421,7 +451,7 @@ void Pachube_Send()
   #ifdef DEBUG
     Serial.println(str.buf);                                        // Print final json string to terminal
   #endif
-  
+
   if (ethernet_ready_dhcp())
   {
     ///ledStatus(true);
@@ -430,6 +460,8 @@ void Pachube_Send()
       Serial.println("sent"); 
     #endif
     ///ledStatus(false);
+  } else {
+    DEBUG_PRINTLN("No DHCP!");
   }
   DEBUG_PRINTLN(datetimeString(now())); 
   DEBUG_PRINT(freeMemory());
@@ -453,6 +485,41 @@ void DisplayData (char *sDisplay, float fDisplay)
     LEDSEG.print(ledBuf);
   #endif
 }
+
+unsigned int pulseValue (int hIn, unsigned int hoursIn) {
+  int i;
+  int h;
+  unsigned int ret;
+  for (i == 0; i<24; i++) {
+    h = i + hIn;
+    if (h > 23) {h = h-24;}
+    DEBUG_PRINT(hoursIn);
+    DEBUG_PRINT(":");
+    DEBUG_PRINT(h);
+    DEBUG_PRINT(" ");
+    DEBUG_PRINT(pulseHour[h]);
+    DEBUG_PRINT(" ");
+    DEBUG_PRINT(hoursHour[h]);
+    if ((hoursIn - hoursHour[h]) < 25) {
+      ret = pulseHour[h];
+      break;
+    }
+  }
+  return ret;
+}
+
+unsigned int hours (unsigned long timeIn) {
+  unsigned int h;
+  if (timeYear == 0) {
+    tm.Year = year(now());
+    tm.Month = 1;
+    tm.Day = 1;
+    timeYear = makeTime(tm)/7200;
+  }
+  h = (timeIn-timeYear)/86400L;
+  return h;
+}
+
 
 #ifdef USELEDSEG
 void LedSeg_DecimalPlace (int precision) {
