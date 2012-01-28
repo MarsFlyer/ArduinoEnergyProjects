@@ -148,7 +148,6 @@ byte server[4] = {173,203,98,29};    // Pachube IP, should use DNS!
 //---------------------------------------------------------------------
 
 // Flow control varaiables
-int bEthernet;
 int dataReady=0;                                                  // is set to 1 when there is data ready to be sent
 unsigned long milRF;                                             // used to check for RF recieve failures
 int post_count;                                                   // used to count number of ethernet posts that dont recieve a reply
@@ -156,8 +155,8 @@ int post_count;                                                   // used to cou
 int pulsePrev=0;           // Counters
 long pulseStart=0;
 int pulseHour[24];         // Holds the pulse count at the start of each hour
-int hoursHour[24];         // Holds the time in hours (since the start of the year)
-unsigned long timeYear;     // The start of the year in hours, using Unix time
+int timeHour[24];          // Holds the time in quarter days (since the start of 2012)
+unsigned long time2012;     // The start of the year in hours, using Unix time
 unsigned long timePrev;    // Last times
 tmElements_t tm;
 int iDay=0;
@@ -223,23 +222,27 @@ void setup()
   DEBUG_PRINTLN("EEPROM data:");
   for(int h = 0; h<24; h++)
   {
+    unsigned int val;
     pulseHour[h] = EEPROMReadInt(h*2);
-    hoursHour[h] = EEPROMReadInt(h*2+25);  
+    timeHour[h] = EEPROMReadInt((h+26)*2);  
     DEBUG_PRINT(h);
     DEBUG_PRINT(" ");
     DEBUG_PRINT(pulseHour[h]);
     DEBUG_PRINT(" ");
-    DEBUG_PRINTLN(hoursHour[h]);
+    DEBUG_PRINTLN(timeHour[h]);
   }
-  // For intraday testing
+  if (false) {
+    // For intraday testing
+    setTime(8,0,0,28,1,2012);  //hr,min,sec,day,month,yr);
+    DEBUG_PRINTLN(timeDiff(now()));
+  }
   if (true) {
-    ///iDay = 24;
-    unsigned int hrs;
-    hrs = hours(now());
+    // For intraday testing
     for(int h = 0; h<24; h++)
     {
-      ///pulseHour[h] = 2000;  
-      hoursHour[h] = hrs;
+      ///if (timeHour[h] < 100) {timeHour[h] = 5558;}
+      timeHour[h] = 120;
+      if (pulseHour[h] < 6000) {pulseHour[h] = 6000;}
     }
   }
   // To setup EEPROM
@@ -263,9 +266,7 @@ void setup()
 //-----------------------------------------------------------------------
 void loop()
 {
-  if (bEthernet != 1) {             // Turned off in DHCP get IP and Date sync in HTML response.
-    ethernet_ready_dhcp();          // Required during DHCP & HTTP. May interfere with RF otherwise.
-  }
+  ethernet_ready_dhcp();          // Required in main loop to enable DHCP & HTTP response.
   //---------------------------------------------------------------------
   // On data receieved from rf12
   //---------------------------------------------------------------------
@@ -304,7 +305,6 @@ void loop()
       DEBUG_PRINT(millis()+milMinInterval-milNext);
       DEBUG_PRINT(" Last RF:");
       DEBUG_PRINTLN(millis()-milRF);
-      bEthernet = 0;  // turn Ethernet on during sending
       Pachube_Send();
       milPachube = millis(); 
       dataReady = 0;                        // reset dataReady
@@ -368,23 +368,23 @@ void Pachube_Send()
   if (dataReady==1)                     // If data is ready: calculate data
   {
     float battVal = (float)emontx.supplyV * 3.3 / (float)1024;
-    dtostrf(battVal, 3, 1, fString);
+    dtostrf(battVal, 4, 3, fString);
     str.print("\r\n2,");
     str.print(fString);
 
     str.print("\r\n4,");
     str.print(emontx.pulse);
 
-    unsigned long timeDiff;
+    unsigned long milDiff;
     
     if (pulsePrev != 0)
     {
-      timeDiff = (millis() - timePrev);
+      milDiff = (millis() - timePrev);
       DEBUG_PRINT("Diff Time:");
-      DEBUG_PRINT(timeDiff);
+      DEBUG_PRINT(milDiff);
       DEBUG_PRINT(" Pulse:");
-      DEBUG_PRINT(emontx.pulse - pulsePrev);      
-      kW = (emontx.pulse - pulsePrev + iTest) * gasKWHM3 * 3600 * 1000 / (timeDiff) / 100;
+      DEBUG_PRINT(emontx.pulse);      
+      kW = (emontx.pulse - pulsePrev + iTest) * gasKWHM3 * 3600 * 1000 / (milDiff) / 100;
       DEBUG_PRINT(" kW:");
       DEBUG_PRINTLN(kW);
       dtostrf(kW, 3, 1, fString);
@@ -397,52 +397,67 @@ void Pachube_Send()
       pulsePrev = emontx.pulse;
       pulseStart = emontx.pulse;
     }
-    if ((timeStatus() == timeSet && day() != iDay))
+    // Can only calculate longer values if we know the time.
+    if (timeStatus() == timeSet)
     {
-      DEBUG_PRINTLN("New day");
-      iDay = day();
-      pulseStart = pulsePrev;
-      EEPROMWriteInt(24*2,pulseStart);
-      EEPROMWriteInt(25*2,iDay);
-    }
-    // Use the array to find the most appropriate previous pulses.
-    unsigned int pulse;
-    unsigned int hoursNow;
-    hoursNow = hours(now());
-    pulse = pulseValue(0, hoursNow);
-    if (pulse == 0) {pulse = emontx.pulse;}
-    kWhDay = (emontx.pulse - pulse) * gasKWHM3 / 100;
-    DEBUG_PRINT(" kWh day:");
-    DEBUG_PRINTLN(kWhDay);
+/*      if (day() != iDay))
+      {
+        DEBUG_PRINTLN("New day");
+        iDay = day();
+        pulseStart = pulsePrev;
+        EEPROMWriteInt(24*2,pulseStart);
+        EEPROMWriteInt(25*2,iDay);
+      }
+*/
+      unsigned int timeNow;
+      timeNow = timeDiff(now());
+      int h;
+      h = hour();
+      if (iHour ==-1) {
+        iHour = h;
+      }
+      if (h != iHour)
+      {
+        DEBUG_PRINT("New hour ");
+        DEBUG_PRINT(h);
+        DEBUG_PRINT(" ");
+        DEBUG_PRINTLN(timeNow);
+        // Set the value for the end of the previous hour.
+        if (h == 0) {h = 23;}
+        else {h = h-1;}
+        EEPROMWriteInt(h*2,pulsePrev);
+        EEPROMWriteInt((h+26)*2,timeNow);
+        h = hour();
+        iHour = h;
+      }
 
-    kWhDay = (emontx.pulse - pulseStart) * gasKWHM3 / 100;
-    DEBUG_PRINT(" kWh day:");
-    DEBUG_PRINTLN(kWhDay);
-    dtostrf(kWhDay, 3, 1, fString);
-    str.print("\r\n6,");
-    str.print(fString);
+      // Use the array to find the most appropriate previous pulses.
+      unsigned int pulse;
 
-    int h = hour();
-    if (timeStatus() == timeSet && h != iHour)
-    {
-      // Set the value for the previous hour.
-      DEBUG_PRINTLN("New hour");
-      if (h == 0) {iHour = 23;}
-      else {iHour = h-1;}
-      EEPROMWriteInt(iHour*2,pulsePrev);
-      iHour = h;
-      DEBUG_PRINT(" Hours:");
-      DEBUG_PRINTLN(hoursNow);
-      EEPROMWriteInt(iHour*2+25,hoursNow);
+      pulse = pulseValue(23, now());
+      if (pulse == 0) {pulse = emontx.pulse;}
+      kWhDay = (emontx.pulse - pulse) * gasKWHM3 / 100;
+      DEBUG_PRINT("kWh day:");
+      DEBUG_PRINTLN(kWhDay);
+        ///kWhDay = (emontx.pulse - pulseStart) * gasKWHM3 / 100;
+      dtostrf(kWhDay, 3, 1, fString);
+      if (kWhDay < 150) {
+        str.print("\r\n6,");
+        str.print(fString);
+      }
+  
+      // Use the value from the same hour yesterday
+      pulse = pulseValue(h, now());
+      if (pulse == 0) {pulse = emontx.pulse;}
+      kWh24 = (emontx.pulse - pulse) * gasKWHM3 / 100;
+      DEBUG_PRINT("kWh 24 hours:");
+      DEBUG_PRINTLN(kWh24);
+      dtostrf(kWh24, 3, 1, fString);
+      if (kWh24 < 150) {
+        str.print("\r\n7,");
+        str.print(fString);
+      }
     }
-    if (pulseHour[h] == 0) {pulseHour[h] = pulseStart;}
-    // Use the value from the 
-    kWh24 = (emontx.pulse - pulseHour[h]) * gasKWHM3 / 100;
-    DEBUG_PRINT(" kWh 24 hours:");
-    DEBUG_PRINTLN(kWh24);
-    dtostrf(kWh24, 3, 1, fString);
-    str.print("\r\n7,");
-    str.print(fString);
 
     pulsePrev = emontx.pulse;
     timePrev = millis();
@@ -473,12 +488,15 @@ void DisplayData (char *sDisplay, float fDisplay)
   #ifdef USELEDSEG
     // Display on 7 segment LED
     LEDSEG.print("v\0");  // Clear contents
-    if (fDisplay < 100) {
+    if (fDisplay == 0) {
+      LedSeg_DecimalPlace(1);
+      sprintf(ledBuf, "%1s%3s", sDisplay, "00");
+    } else if (fDisplay < 100) {
       LedSeg_DecimalPlace(1);
       sprintf(ledBuf, "%1s%3s", sDisplay, dtostrf(fDisplay*10, 3, 0, fString));
     } else {
       LedSeg_DecimalPlace(0);
-      sprintf(ledBuf, "%1s%3s", sDisplay, dtostrf(fDisplay, 3, 1, fString));
+      sprintf(ledBuf, "%1s%3s", sDisplay, dtostrf(fDisplay, 3, 0, fString));
     }
     DEBUG_PRINT("LED=");
     DEBUG_PRINTLN(ledBuf);
@@ -486,43 +504,62 @@ void DisplayData (char *sDisplay, float fDisplay)
   #endif
 }
 
-unsigned int pulseValue (int hIn, unsigned int hoursIn) {
+unsigned int pulseValue (int hIn, unsigned long timeIn)
+{
   int i;
   int h;
+  long diff;
   unsigned int ret;
+  DEBUG_PRINT("Hour:");
+  DEBUG_PRINT(hIn);
+  DEBUG_PRINT(" Qrt:");
+  DEBUG_PRINT(timeDiff(timeIn));
+  DEBUG_PRINT(" > ");
   for (i == 0; i<24; i++) {
     h = i + hIn;
     if (h > 23) {h = h-24;}
-    DEBUG_PRINT(hoursIn);
-    DEBUG_PRINT(":");
+    diff = (long)timeDiff(timeIn) - (long)timeHour[h];
     DEBUG_PRINT(h);
     DEBUG_PRINT(" ");
     DEBUG_PRINT(pulseHour[h]);
     DEBUG_PRINT(" ");
-    DEBUG_PRINT(hoursHour[h]);
-    if ((hoursIn - hoursHour[h]) < 25) {
+    DEBUG_PRINT(timeHour[h]);
+    DEBUG_PRINT(" ");
+    DEBUG_PRINT(diff);
+    DEBUG_PRINT("; ");
+    // Greater than 5 is a previous day so ignore.
+    if (diff < 5) {
       ret = pulseHour[h];
+      DEBUG_PRINT("< ");
       break;
     }
   }
+  DEBUG_PRINTLN(ret);
   return ret;
 }
 
-unsigned int hours (unsigned long timeIn) {
-  unsigned int h;
-  if (timeYear == 0) {
-    tm.Year = year(now());
+unsigned int timeDiff (unsigned long timeIn)
+{
+  // Quarter days from 2012 - provides an integer (2 bytes) until 2055.
+  unsigned long q;
+  if (time2012 == 0) {
+    /*
+    tm.Year = 2012;
     tm.Month = 1;
     tm.Day = 1;
-    timeYear = makeTime(tm)/7200;
+    time2012 = makeTime(tm);
+    */
+    time2012 = 1325376000L;   // 2012-01-01 ??
+    DEBUG_PRINT("time2012:");
+    DEBUG_PRINTLN(datetimeString(time2012));
   }
-  h = (timeIn-timeYear)/86400L;
-  return h;
+  q = (timeIn-time2012)/21600L;
+  return q;
 }
 
-
 #ifdef USELEDSEG
-void LedSeg_DecimalPlace (int precision) {
+void LedSeg_DecimalPlace (int precision)
+{
   LEDSEG.print("w");  // Set decimal places etc.
   // Bits: 00, Apos, Colon, 1234., 123.4, 12.34, 1.234 
   if (precision == 0) {
