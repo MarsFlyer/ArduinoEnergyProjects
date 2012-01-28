@@ -39,6 +39,7 @@ The circuit:
 const int magPin = 7;      // Magnetic sensor - Jeeode DIO4
 const int ledPin = 9;     // Debug LED.
 const int battPin = 3;     // Battery voltage - JeeNode AIO4 
+const int battAio = 4;     // Battery voltage - JeeNode AIO4 
 
 // TEST = High-level; DEBUG Low-level
 #define TEST 1
@@ -84,7 +85,7 @@ PCintPort PCintPort();
 // RF Transmission
 typedef struct { 
   int nPulse; // number of pulses recieved since last update
-  int supplyV; // emontx voltage
+  int battV;  // battery voltage
 } Payload;
 Payload rftx;
 
@@ -94,7 +95,7 @@ void setup() {
     Serial.begin(9600);    // Start serial communication at 9600bps
     flashLed(1500);        // Wait for serial monitor to be setup on PC
     Serial.println("Gas pulses");     
-    Serial.println("Send\tPulses\tSupply V");     
+    Serial.println("Send\tPulses\tBattery V");     
   #endif 
 
   // initialize pins as input / output:
@@ -140,7 +141,7 @@ void loop(){
       Serial.println(millis() - timeLast);
   #endif 
   if (((millis() - timeLast) > timeLoop) || (gasThis >= maxPulse)) {
-    rftx.supplyV = analogRead(battPin);
+    rftx.battV = analogValue(battAio); //analogRead(battPin);
     ///battVal = (float)battState * 3.3 / (float)1024;
     ///dtostrf(battVal, 5, 2, msg);
     rftx.nPulse = gasPulses;
@@ -149,7 +150,7 @@ void loop(){
       Serial.print("Send:\t");     
       Serial.print(rftx.nPulse);    
       Serial.print("\t");     
-      Serial.println(rftx.supplyV);    
+      Serial.println(rftx.battV);    
     #endif 
 
     rfwrite();
@@ -190,7 +191,7 @@ static void rfwrite(){
     TEST_PRINT(" diff:");
     TEST_PRINT(millis() - timeStart);
     rf12_sleep(-1); //wake up RF module
-    rf12_recvDone();
+    rf12_recvDone();   // Need to do this otherwise canSend loops!
     while (!rf12_canSend()) {
       if ((millis() - timeStart) > 4000) {
         TEST_PRINTLN("RF failed.");
@@ -199,13 +200,20 @@ static void rfwrite(){
       }
     }
     rf12_recvDone();
-    //rf12_hdr
+    //rf12_hdr vs 0
     rf12_sendStart(0, &rftx, sizeof rftx); //, RADIO_SYNC_MODE);
     rf12_sendWait(0);  //Power-down mode during wait: 0 = NORMAL, 1 = IDLE, 2 = STANDBY, 3 = PWR_DOWN. Values 2 and 3 can cause the millisecond time to lose a few interrupts. Value 3 can only be used if the ATmega fuses have been set for fast startup, i.e. 258 CK - the default Arduino fuse settings are not suitable for full power down.
     rf12_sleep(0); //put RF module to sleep
     TEST_PRINTLN("RF sent.");
 }
-  
+
+int analogValue(int aio) {
+  int sensor = 0; 
+  for (byte i = 0; i < 10; ++i) {
+    sensor += analogRead(aio); 
+  }
+  sensor /= 10;
+}
 
 void flashLed (int i) {
   digitalWrite(ledPin, !1);
@@ -363,5 +371,4 @@ void setup_watchdog(int ii) {
 ISR(WDT_vect) {
   timeLast -= iWake;  //adjust for missing Millis.
 }
-
 
