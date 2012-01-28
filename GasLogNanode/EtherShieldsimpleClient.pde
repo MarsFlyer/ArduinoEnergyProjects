@@ -46,7 +46,7 @@ char* webserver_vhost;
 
 EtherShield es=EtherShield();
 
-#define BUFFER_SIZE 500
+#define BUFFER_SIZE 400
 static uint8_t buf[BUFFER_SIZE+1];
 uint16_t dat_p;
 int plen = 0;
@@ -102,10 +102,10 @@ int ethernet_ready_dhcp()
     {
       #ifdef DEBUG
       // Display the results:
-      Serial.print( "My IP: " );    printIP( myip );       Serial.println();
-      Serial.print( "Netmask: " );  printIP( mynetmask );  Serial.println();
-      Serial.print( "DNS IP: " );   printIP( dnsip );      Serial.println();
-      Serial.print( "GW IP: " );    printIP( gwip );       Serial.println();
+      Serial.print( "IP: " );    printIP( myip );       Serial.println();
+      ///Serial.print( "Netmask: " );  printIP( mynetmask );  Serial.println();
+      ///Serial.print( "DNS IP: " );   printIP( dnsip );      Serial.println();
+      ///Serial.print( "GW IP: " );    printIP( gwip );       Serial.println();
       #endif
       gotIp = true;
 
