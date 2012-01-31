@@ -170,7 +170,7 @@ unsigned long milPachube;
 unsigned long milNext;
 #define milMinInterval 60000L  // Send indoor temperature if no gas daat. 60 sec
 unsigned long milDisplay;
-#define milDisplayInterval 20000L  // Rotating LED segment display. 20 sec
+#define milDisplayInterval 10000L  // Rotating LED segment display. 20 sec
 int iDisplay;  // What to show.
 
 // Watts config:
@@ -236,13 +236,14 @@ void setup()
     setTime(8,0,0,28,1,2012);  //hr,min,sec,day,month,yr);
     DEBUG_PRINTLN(timeDiff(now()));
   }
-  if (true) {
+  if (false) {
     // For intraday testing
     for(int h = 0; h<24; h++)
     {
-      ///if (timeHour[h] < 100) {timeHour[h] = 5558;}
-      timeHour[h] = 120;
-      if (pulseHour[h] < 6000) {pulseHour[h] = 6000;}
+      if (pulseHour[h] < 6000) {
+        pulseHour[h] = 6000;
+        timeHour[h] = 9999;
+      }
     }
   }
   // To setup EEPROM
@@ -318,13 +319,13 @@ void loop()
     switch( iDisplay )
     {
       case 0: {
-        DisplayData ("d", kWhDay);
+        DisplayData ("d", kWhDay, 0);
         break;}
       case 1: {
-        DisplayData ("r", kWh24);
+        DisplayData ("r", kWh24, 0);
         break;}
       case 2: {
-        DisplayData ("C", fTemperature);
+        DisplayData ("C", fTemperature, 1);
         break;}
     }
   }
@@ -425,6 +426,8 @@ void Pachube_Send()
         // Set the value for the end of the previous hour.
         if (h == 0) {h = 23;}
         else {h = h-1;}
+        pulseHour[h] = pulsePrev;
+        timeHour[h] = timeNow;
         EEPROMWriteInt(h*2,pulsePrev);
         EEPROMWriteInt((h+26)*2,timeNow);
         h = hour();
@@ -441,10 +444,10 @@ void Pachube_Send()
       DEBUG_PRINTLN(kWhDay);
         ///kWhDay = (emontx.pulse - pulseStart) * gasKWHM3 / 100;
       dtostrf(kWhDay, 3, 1, fString);
-      if (kWhDay < 150) {
+      ///if (kWhDay < 150) {
         str.print("\r\n6,");
         str.print(fString);
-      }
+      ///}
   
       // Use the value from the same hour yesterday
       pulse = pulseValue(h, now());
@@ -453,10 +456,10 @@ void Pachube_Send()
       DEBUG_PRINT("kWh 24 hours:");
       DEBUG_PRINTLN(kWh24);
       dtostrf(kWh24, 3, 1, fString);
-      if (kWh24 < 150) {
+      ///if (kWh24 < 150) {
         str.print("\r\n7,");
         str.print(fString);
-      }
+      ///}
     }
 
     pulsePrev = emontx.pulse;
@@ -483,15 +486,15 @@ void Pachube_Send()
   DEBUG_PRINTLN("=memory");
 }
 
-void DisplayData (char *sDisplay, float fDisplay)
+void DisplayData (char *sDisplay, float fDisplay, int iDP)
 {
   #ifdef USELEDSEG
     // Display on 7 segment LED
     LEDSEG.print("v\0");  // Clear contents
-    if (fDisplay == 0) {
+    if (fDisplay == 0 && iDP==1) {
       LedSeg_DecimalPlace(1);
       sprintf(ledBuf, "%1s%3s", sDisplay, "00");
-    } else if (fDisplay < 100) {
+    } else if (fDisplay < 100 && iDP==1) {
       LedSeg_DecimalPlace(1);
       sprintf(ledBuf, "%1s%3s", sDisplay, dtostrf(fDisplay*10, 3, 0, fString));
     } else {
